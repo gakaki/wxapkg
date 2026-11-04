@@ -115,11 +115,12 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          if [[ "${{ matrix.platform }}" == darwin/* ]]; then
+          platform="${{ matrix.platform }}"
+          if [[ "$platform" == darwin/* ]]; then
             ./scripts/build-macos.sh
           else
             ./scripts/fetch-oxfmt.sh "${platform%/*}" "${platform#*/}"
-            go tool mygo build -platform "${{ matrix.platform }}"
+            go tool mygo build -platform "$platform"
           fi
 
       - name: Collect release files
