@@ -90,6 +90,45 @@ func TestRemoveMatchingBatchOutputs(t *testing.T) {
 	}
 }
 
+func TestRemoveStaleBatchStages(t *testing.T) {
+	root := t.TempDir()
+	stale := []string{
+		".wxapkg-batch-123",
+		".wxapkg-batch-crashed",
+	}
+	keep := []string{
+		"企业专属服务-wx1111111111111111-20261104-110400",
+		".wxapkg-user-data",
+	}
+	for _, name := range append(append([]string{}, stale...), keep...) {
+		if err := os.Mkdir(filepath.Join(root, name), 0o755); err != nil {
+			t.Fatal(err)
+		}
+	}
+	keepFile := ".wxapkg-batch-notes.txt"
+	if err := os.WriteFile(filepath.Join(root, keepFile), []byte("keep"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+
+	removed, err := removeStaleBatchStages(root)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(removed) != len(stale) {
+		t.Fatalf("removed = %v, want %v", removed, stale)
+	}
+	for _, name := range stale {
+		if _, err := os.Stat(filepath.Join(root, name)); !os.IsNotExist(err) {
+			t.Fatalf("%s still exists, err = %v", name, err)
+		}
+	}
+	for _, name := range append(keep, keepFile) {
+		if _, err := os.Stat(filepath.Join(root, name)); err != nil {
+			t.Fatalf("%s should be kept: %v", name, err)
+		}
+	}
+}
+
 func TestRunBatchJobUnpacksAndReplacesMatchingOutput(t *testing.T) {
 	root := t.TempDir()
 	packagePath := filepath.Join(t.TempDir(), "sample.wxapkg")

@@ -92,7 +92,7 @@ jobs:
 
       - name: Install NSIS
         if: startsWith(matrix.platform, 'windows/')
-        run: sudo apt-get update && sudo apt-get install -y nsis
+        run: sudo apt-get update && sudo apt-get install -y nsis unzip
 
       - name: Build native package
         env:
@@ -103,6 +103,7 @@ jobs:
           if [[ "${{ matrix.platform }}" == darwin/* ]]; then
             ./scripts/build-macos.sh
           else
+            ./scripts/fetch-oxfmt.sh "${platform%/*}" "${platform#*/}"
             go tool mygo build -platform "${{ matrix.platform }}"
           fi
 

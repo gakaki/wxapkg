@@ -13,13 +13,28 @@
 - 支持粘贴路径、命令行传入路径和系统文件选择器
 - 使用小程序 ID 解密新版加密包
 - 还原小程序源码目录结构
-- JSON、HTML、JavaScript 代码美化
+- 使用 OXC 的 Oxfmt Rust 二进制并行美化 JavaScript、HTML 和 JSON，无需安装 Node.js
 - 原生表格排序、搜索、后台解包、进度与完成提示
 - 一键批量解包列表中的全部小程序，按“小程序名称-小程序 ID-修改时间”保存并自动替换同名同 ID 的旧结果
 - 从包内配置和微信官方公开资料页识别中文名称，失败时显示“未识别”
 - 每行可打开小程序缓存的上级目录（通常为 `packages`）
 - 一键清空微信 `packages` 下的小程序下载目录，执行前显示原生危险操作确认
 - 默认批量输出到 `桌面/微信小程序解包目录/`，也可以在设置中修改默认输出目录
+
+## 代码美化性能
+
+JS/HTML/JSON 格式化已从旧版逐文件 Go 美化切换到 [OXC](https://oxc.rs/) 的 [`oxfmt`](https://github.com/oxc-project/oxc)。Oxfmt 是 Rust 原生二进制，支持多线程，不依赖 Node.js，也不使用 WebView。
+
+本机同一份真实微信小程序包（22.9 MB、3938 个文件）实测：
+
+| 模式 | 耗时 |
+| --- | ---: |
+| 仅解包，不美化 | 约 0.18–0.26 秒 |
+| 解包 + Oxfmt 美化 | 约 0.59–1.10 秒 |
+
+旧 Go 美化实现处理同一份输出超过 5 分钟仍未完成。批量解包还会在 Oxfmt 可用时最多并行处理 4 个小程序，并按任务数分配格式化线程。发布包内置 Oxfmt `0.76.0`；源码运行时如果找不到该二进制，会自动回退到旧 Go 美化实现，功能仍可用，但速度会明显较慢。
+
+Oxfmt 使用 MIT 许可，许可全文见 [resources/oxfmt-LICENSE.txt](resources/oxfmt-LICENSE.txt)。
 
 ## 最新系统与微信目录
 
@@ -90,11 +105,14 @@ go tool mygo dev
 ./scripts/build-macos.sh
 ```
 
-`scripts/build-macos.sh` 会生成通用 macOS `.app` 和 `.dmg`，并写入稳定的完全磁盘访问代码要求。Windows 安装包：
+`scripts/build-macos.sh` 会自动下载并校验 Oxfmt，然后生成通用 macOS `.app` 和 `.dmg`，并写入稳定的完全磁盘访问代码要求。Windows 安装包：
 
 ```bash
-go tool mygo build -platform windows/amd64,windows/arm64
+./scripts/fetch-oxfmt.sh windows amd64
+go tool mygo build -platform windows/amd64
 ```
+
+构建 Windows ARM64 安装包时把两条命令中的 `amd64` 都改为 `arm64`。下载缓存位于 `~/.local/share/codex-tools/cache/wxapkg/oxfmt/`，每个文件都会按固定 SHA-256 校验。网络较慢时可设置 `WXAPKG_USE_PROXY=1` 使用本机 `127.0.0.1:7890` 代理，或通过 `WXAPKG_PROXY` 指定其他代理。
 
 产物位于 `build/`：
 
@@ -123,6 +141,10 @@ go tool mygo vet .
 
 ```bash
 WXAPKG_LIVE_TEST=1 go test ./wechat -run TestLiveWeChatUnpack -v
+
+WXAPKG_LIVE_TEST=1 \
+WXAPKG_OXFMT="$PWD/resources/darwin-arm64/oxfmt" \
+go test ./wechat -run TestLiveUnpackPerformance -v -count=1 -timeout=5m
 ```
 
 ## 技术说明
@@ -130,12 +152,14 @@ WXAPKG_LIVE_TEST=1 go test ./wechat -run TestLiveWeChatUnpack -v
 - 窗口使用 `mygo.WindowOptions.Content` 和 `ui.View` 构建。
 - 所有交互均由 `github.com/egoist/mygo/ui` 原生组件完成。
 - 全局禁用 WebView、Chromium、WebKit、WebView2、GTK WebKit 和前端构建步骤。
+- 解包由 Go 完成；JS/HTML/JSON 格式化调用随应用打包的 Oxfmt Rust 二进制，并行度和格式化线程数受控。
 - 项目规则见 [AGENTS.md](AGENTS.md)。
 
 ## 来源与灵感
 
 - 本项目的产品方向、微信小程序扫描与解包思路来自 [wux1an/wxapkg](https://github.com/wux1an/wxapkg)。感谢原作者和贡献者提供的基础与灵感。
 - 当前版本在此基础上完全使用 [egoist/mygo](https://github.com/egoist/mygo) 的 MyGo Native UI 重写：窗口、表格、弹窗、文件选择器和全部交互均由 Go 原生组件实现，不使用 Wails、WebView、HTML、CSS 或 JavaScript 前端。
+- 代码美化的高性能实现来自 [OXC / Oxfmt](https://oxc.rs/docs/guide/usage/formatter)，感谢 Oxc 项目及贡献者。
 - 微信小程序解密、解包格式和原理还参考了下方“参考”中列出的公开项目与文章。
 
 ## 参考

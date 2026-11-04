@@ -8,6 +8,7 @@ if [[ "$(uname -s)" != "Darwin" ]]; then
   exit 1
 fi
 
+./scripts/fetch-oxfmt.sh darwin universal
 go tool mygo build -platform darwin/universal
 
 build_dir="build/darwin-universal"

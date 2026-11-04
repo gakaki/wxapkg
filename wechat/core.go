@@ -32,6 +32,8 @@ type UnpackOptions struct {
 	EnableJsonBeautify bool
 	OutputDir          string
 	SavePath           string
+	ExternalFormatter  string
+	FormatterThreads   int
 }
 
 type WxapkgItem struct {
@@ -333,6 +335,14 @@ func (u *Unpacker) UnpackWithStatusCallback(callback func(item *WxapkgItem)) {
 
 	var hasError = u.unpack(20, callback)
 
+	if !hasError && u.usesExternalFormatter() {
+		u.item.UnpackProgress = 99
+		u.item.UnpackCurrentFile = "正在使用 OXC 美化 JS / HTML / JSON…"
+		callback(u.item)
+		_ = u.formatOutput()
+		u.item.UnpackProgress = 100
+	}
+
 	if !hasError {
 		u.item.UnpackStatus = StatusTypeFinished
 		callback(u.item)
@@ -389,13 +399,15 @@ func (u *Unpacker) unpack(thread int, callback func(item *WxapkgItem)) bool {
 
 				data := (*d.rawFileData)[d.offset : d.offset+d.size]
 
-				var ext = filepath.Ext(d.name)
-				if ext == ".json" && u.options.EnableJsonBeautify {
-					data = PrettyJson(data)
-				} else if ext == ".html" && u.options.EnableHtmlBeautify {
-					data = PrettyHtml(data)
-				} else if ext == ".js" && u.options.EnableJsBeautify {
-					data = PrettyJavaScript(data)
+				if !u.usesExternalFormatter() {
+					var ext = filepath.Ext(d.name)
+					if ext == ".json" && u.options.EnableJsonBeautify {
+						data = PrettyJson(data)
+					} else if ext == ".html" && u.options.EnableHtmlBeautify {
+						data = PrettyHtml(data)
+					} else if ext == ".js" && u.options.EnableJsBeautify {
+						data = PrettyJavaScript(data)
+					}
 				}
 
 				err = os.WriteFile(d.savePath, data, 0600)

@@ -7,3 +7,7 @@ mygo_windows_*.syso
 .idea
 .DS_Store
 test
+/resources/darwin-arm64/
+/resources/darwin-amd64/
+/resources/windows-amd64/
+/resources/windows-arm64/

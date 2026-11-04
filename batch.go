@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"time"
 	"unicode/utf8"
 
@@ -24,6 +25,8 @@ type batchUnpackJob struct {
 	finalPath string
 	key       string
 	decrypt   bool
+	formatter string
+	threads   int
 }
 
 func defaultUnpackOutputDir() string {
@@ -97,8 +100,15 @@ func (a *app) startBatchUnpack() {
 		a.queueNotice("无法创建输出目录", err.Error(), true)
 		return
 	}
+	if _, err := removeStaleBatchStages(root); err != nil {
+		a.queueNotice("无法清理上次中断的临时目录", err.Error(), true)
+		return
+	}
 
 	jobs := make([]batchUnpackJob, 0, len(a.items))
+	formatterPath := findOxfmtPath()
+	concurrency := batchUnpackConcurrency(len(a.items), formatterPath != "")
+	threads := formatterThreads(concurrency)
 	for _, item := range a.items {
 		key := firstNonEmpty(item.EncryptKey, item.WxId)
 		decrypt := key != "" && key != "unknown"
@@ -113,24 +123,31 @@ func (a *app) startBatchUnpack() {
 			finalPath: filepath.Join(root, base+"-"+batchOutputModified(item.LastModifyTime)),
 			key:       key,
 			decrypt:   decrypt,
+			formatter: formatterPath,
+			threads:   threads,
 		})
 	}
 
 	a.batchRunning = true
 	a.batchIndex = 0
 	a.batchTotal = len(jobs)
-	go a.confirmBatchUnpack(jobs, root)
+	go a.confirmBatchUnpack(jobs, root, concurrency, formatterPath != "")
 }
 
-func (a *app) confirmBatchUnpack(jobs []batchUnpackJob, root string) {
+func (a *app) confirmBatchUnpack(jobs []batchUnpackJob, root string, concurrency int, hasFormatter bool) {
+	formatterNote := "使用内置 OXC 引擎并行美化 JS / HTML / JSON。"
+	if !hasFormatter {
+		formatterNote = "未找到 OXC 引擎，将使用兼容模式，速度会明显较慢。"
+	}
 	result, err := mygo.Dialog.Message(mygo.MessageOptions{
 		Parent:  a.win,
 		Type:    mygo.MessageQuestion,
 		Title:   "批量解包",
-		Message: fmt.Sprintf("将依次解包列表中的 %d 个小程序。", len(jobs)),
+		Message: fmt.Sprintf("将并行解包列表中的 %d 个小程序，最多同时 %d 个。", len(jobs), concurrency),
 		Detail: "输出目录：\n" + root + "\n\n" +
 			"目录格式：小程序名称-小程序ID-修改时间\n" +
-			"同名且同 ID 的旧解包目录会自动删除并替换，其他目录不受影响。",
+			"同名且同 ID 的旧解包目录会自动删除并替换，其他目录不受影响。\n" +
+			formatterNote,
 		Buttons:            []string{"取消", "开始批量解包"},
 		DefaultButton:      0,
 		CancelButton:       0,
@@ -152,36 +169,57 @@ func (a *app) confirmBatchUnpack(jobs []batchUnpackJob, root string) {
 		})
 		return
 	}
-	a.runBatchUnpack(jobs)
+	a.runBatchUnpack(jobs, concurrency)
 }
 
-func (a *app) runBatchUnpack(jobs []batchUnpackJob) {
+func (a *app) runBatchUnpack(jobs []batchUnpackJob, concurrency int) {
+	if concurrency < 1 {
+		concurrency = 1
+	}
+	semaphore := make(chan struct{}, concurrency)
+	var wait sync.WaitGroup
+	var counts sync.Mutex
 	successes, failures := 0, 0
 	failureDetails := make([]string, 0, 4)
-	for index, job := range jobs {
-		current := index + 1
-		a.win.Update(func() {
-			a.batchIndex = current
-			a.markBatchItemRunning(job)
-		})
 
-		snapshot, err := a.runBatchJob(job)
-		if err == nil && snapshot.UnpackStatus != wechat.StatusTypeFinished {
-			err = fmt.Errorf("解包未完成")
-		}
-		if err != nil {
-			failures++
-			if len(failureDetails) < 4 {
-				label := firstNonEmpty(job.item.Name, job.item.WxId, filepath.Base(job.item.Location))
-				failureDetails = append(failureDetails, fmt.Sprintf("%s：%v", label, err))
+	for _, queued := range jobs {
+		job := queued
+		wait.Add(1)
+		go func() {
+			defer wait.Done()
+			semaphore <- struct{}{}
+			defer func() { <-semaphore }()
+
+			a.win.Update(func() {
+				a.markBatchItemRunning(job)
+			})
+			snapshot, err := a.runBatchJob(job)
+			if err == nil && snapshot.UnpackStatus != wechat.StatusTypeFinished {
+				err = fmt.Errorf("解包未完成")
 			}
-		} else {
-			successes++
-		}
-		a.win.Update(func() {
-			a.updateItem(snapshot)
-		})
+
+			counts.Lock()
+			if err != nil {
+				failures++
+				if len(failureDetails) < 4 {
+					label := firstNonEmpty(job.item.Name, job.item.WxId, filepath.Base(job.item.Location))
+					failureDetails = append(failureDetails, fmt.Sprintf("%s：%v", label, err))
+				}
+			} else {
+				successes++
+			}
+			done := successes + failures
+			counts.Unlock()
+
+			a.win.Update(func() {
+				a.updateItem(snapshot)
+				if done > a.batchIndex {
+					a.batchIndex = done
+				}
+			})
+		}()
 	}
+	wait.Wait()
 
 	a.win.Update(func() {
 		a.batchRunning = false
@@ -242,6 +280,8 @@ func (a *app) runBatchJob(job batchUnpackJob) (wechat.WxapkgItem, error) {
 		EnableJsonBeautify: true,
 		OutputDir:          job.root,
 		SavePath:           stage,
+		ExternalFormatter:  job.formatter,
+		FormatterThreads:   job.threads,
 	}
 	var last time.Time
 	unpacker := wechat.NewUnpacker(&worker, &options)
@@ -304,6 +344,29 @@ func removeMatchingBatchOutputs(root, prefix string) ([]string, error) {
 	for _, entry := range entries {
 		name := entry.Name()
 		if !entry.IsDir() || !strings.HasPrefix(name, prefix) || len(name) <= len(prefix) {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(root, name)); err != nil {
+			return removed, fmt.Errorf("%s：%v", name, err)
+		}
+		removed = append(removed, name)
+	}
+	return removed, nil
+}
+
+func removeStaleBatchStages(root string) ([]string, error) {
+	entries, err := os.ReadDir(root)
+	if os.IsNotExist(err) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+
+	removed := make([]string, 0, 1)
+	for _, entry := range entries {
+		name := entry.Name()
+		if !entry.IsDir() || !strings.HasPrefix(name, ".wxapkg-batch-") {
 			continue
 		}
 		if err := os.RemoveAll(filepath.Join(root, name)); err != nil {

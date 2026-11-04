@@ -2,6 +2,7 @@ package main
 
 import (
 	"path/filepath"
+	"runtime"
 	"testing"
 
 	"github.com/egoist/mygo/ui"
@@ -117,4 +118,22 @@ func TestFormatHelpers(t *testing.T) {
 
 func uiSort(column string, descending bool) ui.SortOrder {
 	return ui.SortOrder{Column: column, Descending: descending}
+}
+
+func TestFormatterConcurrencyLimits(t *testing.T) {
+	previous := runtime.GOMAXPROCS(8)
+	t.Cleanup(func() { runtime.GOMAXPROCS(previous) })
+
+	if got := formatterThreads(4); got != 2 {
+		t.Fatalf("formatterThreads(4) = %d, want 2", got)
+	}
+	if got := formatterThreads(1); got != 8 {
+		t.Fatalf("formatterThreads(1) = %d, want 8", got)
+	}
+	if got := batchUnpackConcurrency(19, true); got != 4 {
+		t.Fatalf("batchUnpackConcurrency = %d, want 4", got)
+	}
+	if got := batchUnpackConcurrency(19, false); got != 1 {
+		t.Fatalf("batchUnpackConcurrency without formatter = %d, want 1", got)
+	}
 }

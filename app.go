@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	appVersion = "v2.2.0"
+	appVersion = "v2.3.0"
 	githubURL  = "https://github.com/gakaki/wxapkg"
 )
 
@@ -425,6 +425,8 @@ func (a *app) startUnpack() {
 		EnableJsonBeautify: a.unpackJSON,
 		OutputDir:          outputDir,
 		SavePath:           item.UnpackSavePath,
+		ExternalFormatter:  findOxfmtPath(),
+		FormatterThreads:   formatterThreads(1),
 	}
 
 	go func() {
