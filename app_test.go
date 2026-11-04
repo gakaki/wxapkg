@@ -73,18 +73,19 @@ func TestMergeItemsPreservesUnpackState(t *testing.T) {
 }
 
 func TestComputeSavePath(t *testing.T) {
-	got := computeSavePath("/tmp/output", "/tmp/mini/wx1111111111111111", "企业专属服务")
-	want := filepath.Join("/tmp/output", "wx1111111111111111_unpacked_企业专属服务")
+	output := t.TempDir()
+	got := computeSavePath(output, "/tmp/mini/wx1111111111111111", "企业专属服务")
+	want := filepath.Join(output, "wx1111111111111111_unpacked_企业专属服务")
 	if got != want {
 		t.Fatalf("computeSavePath = %q, want %q", got, want)
 	}
-	got = computeSavePath("/tmp/output", "/tmp/mini/sample.wxapkg", "未识别")
-	want = filepath.Join("/tmp/output", "sample_unpacked")
+	got = computeSavePath(output, "/tmp/mini/sample.wxapkg", "未识别")
+	want = filepath.Join(output, "sample_unpacked")
 	if got != want {
 		t.Fatalf("computeSavePath = %q, want %q", got, want)
 	}
-	got = computeSavePath("/tmp/output", "/tmp/mini/sample.wxapkg", `A/B\C:D`)
-	want = filepath.Join("/tmp/output", "sample_unpacked_A_B_C_D")
+	got = computeSavePath(output, "/tmp/mini/sample.wxapkg", `A/B\C:D`)
+	want = filepath.Join(output, "sample_unpacked_A_B_C_D")
 	if got != want {
 		t.Fatalf("computeSavePath sanitized = %q, want %q", got, want)
 	}

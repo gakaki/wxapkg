@@ -16,7 +16,7 @@ import (
 )
 
 const (
-	appVersion = "v2.3.0"
+	appVersion = "v2.3.1"
 	githubURL  = "https://github.com/gakaki/wxapkg"
 )
 
