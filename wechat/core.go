@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"path"
 	"path/filepath"
 	"regexp"
 	"strings"
@@ -34,14 +35,19 @@ type UnpackOptions struct {
 }
 
 type WxapkgItem struct {
-	UUID            string
-	WxId            string
-	Location        string
-	EncryptKey      string
-	Size            int64
-	IsDir           bool
-	LastModifyTime  int64
-	WxapkgFilePaths []string
+	UUID                   string
+	WxId                   string
+	Name                   string
+	NameProvider           string
+	NameProviderID         string
+	FallbackNameProvider   string
+	FallbackNameProviderID string
+	Location               string
+	EncryptKey             string
+	Size                   int64
+	IsDir                  bool
+	LastModifyTime         int64
+	WxapkgFilePaths        []string
 
 	UnpackStatus       StatusType
 	UnpackCurrent      int64
@@ -75,10 +81,33 @@ type WxapkgFileItemStructure struct {
 	rawFilePath *string
 }
 
+// cleanWxapkgPath converts an index entry to a path relative to the package
+// root. Recent WeChat packages use entries such as "/static/app.js", where
+// the leading slash denotes the package root rather than the host filesystem.
+func cleanWxapkgPath(rawName string) (string, error) {
+	name := strings.ReplaceAll(strings.TrimSpace(rawName), `\`, "/")
+	name = strings.TrimLeft(name, "/")
+	if name == "" || strings.ContainsRune(name, 0) {
+		return "", errors.New("文件名无效")
+	}
+
+	cleanName := path.Clean(name)
+	if cleanName == "." || cleanName == ".." || strings.HasPrefix(cleanName, "../") {
+		return "", errors.Errorf("文件名 %s 会导致目录穿越", rawName)
+	}
+	if len(cleanName) >= 2 && cleanName[1] == ':' &&
+		((cleanName[0] >= 'a' && cleanName[0] <= 'z') || (cleanName[0] >= 'A' && cleanName[0] <= 'Z')) {
+		return "", errors.Errorf("文件名 %s 是主机绝对路径", rawName)
+	}
+	return cleanName, nil
+}
+
 // PathScanResult GetDefaultPaths 的返回类型
 type PathScanResult struct {
-	Paths []string // 检测到的小程序安装目录
-	Logs  string   // 检测过程的日志详情
+	Paths                 []string // 检测到的小程序安装目录
+	Logs                  string   // 检测过程的日志详情
+	NeedsFullDiskAccess   bool     // macOS 阻止访问微信沙盒目录
+	PermissionBlockedPath string   // 被系统拒绝访问的路径
 }
 
 type platform interface {
@@ -183,18 +212,30 @@ func (u *Unpacker) analyze(data []byte, wxapkgFilePath string) ([]*WxapkgFileIte
 		bodyInfoLength  uint32
 		lastMark        uint8
 	)
-	_ = binary.Read(f, binary.BigEndian, &firstMark)
-	_ = binary.Read(f, binary.BigEndian, &info1)
-	_ = binary.Read(f, binary.BigEndian, &indexInfoLength)
-	_ = binary.Read(f, binary.BigEndian, &bodyInfoLength)
-	_ = binary.Read(f, binary.BigEndian, &lastMark)
+	if err := binary.Read(f, binary.BigEndian, &firstMark); err != nil {
+		return nil, errors.Wrap(err, "读取文件头失败")
+	}
+	if err := binary.Read(f, binary.BigEndian, &info1); err != nil {
+		return nil, errors.Wrap(err, "读取文件头失败")
+	}
+	if err := binary.Read(f, binary.BigEndian, &indexInfoLength); err != nil {
+		return nil, errors.Wrap(err, "读取索引长度失败")
+	}
+	if err := binary.Read(f, binary.BigEndian, &bodyInfoLength); err != nil {
+		return nil, errors.Wrap(err, "读取正文长度失败")
+	}
+	if err := binary.Read(f, binary.BigEndian, &lastMark); err != nil {
+		return nil, errors.Wrap(err, "读取文件尾失败")
+	}
 
 	if firstMark != 0xBE || lastMark != 0xED {
 		return nil, errors.New("wxapkg 文件结构不合法")
 	}
 
 	var fileCount uint32
-	_ = binary.Read(f, binary.BigEndian, &fileCount)
+	if err := binary.Read(f, binary.BigEndian, &fileCount); err != nil {
+		return nil, errors.Wrap(err, "读取文件数量失败")
+	}
 	if fileCount > 102400 {
 		return nil, errors.Errorf("文件总数量 %d 超出上限 102400", fileCount)
 	}
@@ -203,48 +244,68 @@ func (u *Unpacker) analyze(data []byte, wxapkgFilePath string) ([]*WxapkgFileIte
 	var result = make([]*WxapkgFileItemStructure, fileCount)
 	for i := uint32(0); i < fileCount; i++ {
 		var nameLen = uint32(0)
-		_ = binary.Read(f, binary.BigEndian, &nameLen)
+		if err := binary.Read(f, binary.BigEndian, &nameLen); err != nil {
+			return nil, errors.Wrap(err, "读取文件名长度失败")
+		}
 
 		if nameLen > 1024 {
 			return nil, errors.Errorf("文件名长度 %d 超出上限 1024 字节", nameLen)
 		}
 
 		var nameBytes = make([]byte, nameLen)
-		_, _ = io.ReadAtLeast(f, nameBytes, int(nameLen))
+		if _, err := io.ReadFull(f, nameBytes); err != nil {
+			return nil, errors.Wrap(err, "读取文件名失败")
+		}
 
 		var item = &WxapkgFileItemStructure{
 			rawFileData: &data,
 			rawFilePath: &wxapkgFilePath,
 		}
-		_ = binary.Read(f, binary.BigEndian, &item.offset)
-		_ = binary.Read(f, binary.BigEndian, &item.size)
+		if err := binary.Read(f, binary.BigEndian, &item.offset); err != nil {
+			return nil, errors.Wrap(err, "读取文件偏移失败")
+		}
+		if err := binary.Read(f, binary.BigEndian, &item.size); err != nil {
+			return nil, errors.Wrap(err, "读取文件长度失败")
+		}
+
+		// Recent packages may prefix entries with a slash. Use a package-root
+		// relative path for deduplication and extraction.
+		cleanName, err := cleanWxapkgPath(string(nameBytes))
+		if err != nil {
+			return nil, err
+		}
+		item.name = cleanName
 
 		// check if a file path exists, use a.txt -> a-1.txt -> a-2.txt
 		var j = 1
-		var name = string(nameBytes)
-		item.name = name
 		for u.fileNameMap[item.name] {
-			dot := strings.LastIndex(name, ".")
+			dot := strings.LastIndex(item.name, ".")
 			if dot == -1 { // no extension
-				item.name = fmt.Sprintf("%s-%d", item.name, j)
+				item.name = fmt.Sprintf("%s-%d", cleanName, j)
 			} else {
-				item.name = fmt.Sprintf("%s-%d%s", item.name[:dot], j, item.name[dot:])
+				item.name = fmt.Sprintf("%s-%d%s", cleanName[:dot], j, cleanName[dot:])
 			}
 			j++
 		}
 		u.fileNameMap[item.name] = true
 
-		// combine paths and check
-		var err error
-		item.savePath, err = filepath.Abs(filepath.Join(u.item.UnpackSavePath, item.name))
+		root, err := filepath.Abs(u.item.UnpackSavePath)
+		if err != nil {
+			return nil, errors.Errorf("输出目录 '%s' 解析失败，%v", u.item.UnpackSavePath, err)
+		}
+		item.savePath, err = filepath.Abs(filepath.Join(root, filepath.FromSlash(item.name)))
 		if err != nil {
 			return nil, errors.Errorf("文件名拼接出错，%v", err)
 		}
-		if !strings.HasPrefix(item.savePath, u.item.UnpackSavePath) {
+		rel, err := filepath.Rel(root, item.savePath)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) || filepath.IsAbs(rel) {
 			return nil, errors.Errorf("文件名 %s 会导致目录穿越", item.name)
 		}
 		if item.size > 10*1024*1024 {
 			return nil, errors.Errorf("文件名 %s 标记长度 %d 超出上限 10 MB", item.name, item.size)
+		}
+		if uint64(item.offset)+uint64(item.size) > uint64(len(data)) {
+			return nil, errors.Errorf("文件名 %s 的数据范围超出文件大小", item.name)
 		}
 
 		result[i] = item

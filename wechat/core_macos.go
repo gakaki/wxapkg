@@ -17,55 +17,83 @@ func (m *macosPlatform) GetDefaultPaths() PathScanResult {
 	var b strings.Builder
 	log := func(line string) { b.WriteString(line + "\n") }
 
-	var paths []string
-
-	userHomeDir, err := os.UserHomeDir()
+	home, err := os.UserHomeDir()
 	if err != nil {
 		log("获取用户目录失败: " + err.Error())
-		return PathScanResult{Paths: paths, Logs: b.String()}
+		return PathScanResult{Logs: b.String()}
 	}
 
-	// ── Step 1: 微信 v3 ──
-	v3Path := filepath.Join(userHomeDir, "Library/Containers/com.tencent.xinWeChat/Data/.wxapplet/packages")
-	if fileInfo, err := os.Stat(v3Path); err == nil && fileInfo.IsDir() {
-		log(fmt.Sprintf("1. 【成功】检测微信 v3 (3.x 版本) - 成功\n   路径: %s", v3Path))
-		paths = append(paths, v3Path)
-	} else {
-		log(fmt.Sprintf("1. 【失败】检测微信 v3 (3.x 版本) - 目录不存在\n   路径: %s", v3Path))
-	}
-
-	// ── Step 2: 微信 v4 ──
-	v4Path := filepath.Join(userHomeDir, "Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/Applet/packages")
-	if fileInfo, err := os.Stat(v4Path); err == nil && fileInfo.IsDir() {
-		log(fmt.Sprintf("2. 【成功】检测微信 v4 (4.x 版本) - 成功\n   路径: %s", v4Path))
-		paths = append(paths, v4Path)
-	} else {
-		log(fmt.Sprintf("2. 【失败】检测微信 v4 (4.x 版本) - 目录不存在\n   路径: %s", v4Path))
-	}
-
-	// ── Step 3: 微信 v4 多用户 ──
-	v4UsersPath := filepath.Join(userHomeDir, "Library/Containers/com.tencent.xinWeChat/Data/Documents/app_data/radium/users")
-	entries, err := os.ReadDir(v4UsersPath)
-	if err != nil {
-		log(fmt.Sprintf("3. 【失败】检测微信 v4 多用户 (4.x 版本) - 目录不存在\n   路径: %s", v4UsersPath))
-	} else {
-		var found []string
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			userAppletPath := filepath.Join(v4UsersPath, entry.Name(), "applet", "packages")
-			if fileInfo, err := os.Stat(userAppletPath); err == nil && fileInfo.IsDir() {
-				paths = append(paths, userAppletPath)
-				found = append(found, entry.Name())
-			}
-		}
-		if len(found) == 0 {
-			log(fmt.Sprintf("3. 【失败】检测微信 v4 多用户 (4.x 版本) - 未找到有效用户\n   路径: %s", v4UsersPath))
-		} else {
-			log(fmt.Sprintf("3. 【成功】检测微信 v4 多用户 (4.x 版本) - 成功\n   路径: %s\n   有效用户: %s", v4UsersPath, strings.Join(found, ", ")))
+	container := filepath.Join(home, "Library", "Containers", "com.tencent.xinWeChat", "Data")
+	radium := filepath.Join(container, "Documents", "app_data", "radium")
+	var blockedPath string
+	v3 := filepath.Join(container, ".wxapplet", "packages")
+	for _, candidate := range []string{
+		container,
+		radium,
+		filepath.Join(container, ".wxapplet"),
+		v3,
+	} {
+		if _, err := os.ReadDir(candidate); isPermissionError(err) {
+			blockedPath = candidate
+			break
 		}
 	}
+	if blockedPath != "" {
+		log("【需要权限】macOS 已阻止读取微信沙盒目录")
+		log("   路径: " + blockedPath)
+		log("   请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中添加并启用本应用。")
+	}
 
-	return PathScanResult{Paths: paths, Logs: b.String()}
+	seen := make(map[string]struct{})
+	var paths []string
+	add := func(label, path string) {
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok || !isDirectory(path) {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+		log(fmt.Sprintf("【成功】%s\n   路径: %s", label, path))
+	}
+
+	// WeChat 3.x
+	add("微信 3.x 小程序目录", v3)
+	if !isDirectory(v3) {
+		log("【未找到】微信 3.x 小程序目录\n   路径: " + v3)
+	}
+
+	if blockedPath == "" {
+		// WeChat 4.1.7+ stores packages under the current account hash.
+		discovered, denied := discoverAppletPackageDirsWithAccess(radium, 5)
+		for _, path := range discovered {
+			add("微信 4.1.7+ 当前用户小程序目录", path)
+		}
+		if denied != "" {
+			blockedPath = denied
+			log("【需要权限】macOS 已阻止读取微信小程序目录")
+			log("   路径: " + blockedPath)
+			log("   请在“系统设置 → 隐私与安全性 → 完全磁盘访问权限”中添加并启用本应用。")
+		}
+		if len(paths) == 0 {
+			log("【未找到】微信 4.1.7+ 用户目录\n   根路径: " + radium)
+		}
+
+		// WeChat 4.0 and transitional layouts.
+		for _, candidate := range []string{
+			filepath.Join(radium, "Applet", "packages"),
+			filepath.Join(radium, "applet", "packages"),
+		} {
+			add("微信 4.0 小程序目录", candidate)
+		}
+	}
+
+	if len(paths) == 0 && blockedPath == "" {
+		log("【提示】请先在微信中打开任意小程序，再重新检测。")
+	}
+	return PathScanResult{
+		Paths:                 dedupePaths(paths),
+		Logs:                  b.String(),
+		NeedsFullDiskAccess:   blockedPath != "",
+		PermissionBlockedPath: blockedPath,
+	}
 }

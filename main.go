@@ -1,36 +1,37 @@
 package main
 
 import (
-	"embed"
 	"log"
+	"os"
+	"strings"
 
-	"github.com/wailsapp/wails/v2"
-	"github.com/wailsapp/wails/v2/pkg/options"
-	"github.com/wailsapp/wails/v2/pkg/options/assetserver"
+	"github.com/egoist/mygo"
+	"github.com/egoist/mygo/ui"
 )
 
-//go:embed all:frontend/dist
-var assets embed.FS
-
-var version = "v2.0.1"
-var github = "https://github.com/wux1an/wxapkg"
-
 func main() {
-	app := NewAppService()
+	a := newApp()
+	for _, arg := range os.Args[1:] {
+		if !strings.HasPrefix(arg, "-") {
+			a.initialPath = arg
+			break
+		}
+	}
 
-	err := wails.Run(&options.App{
-		Title:  "微信小程序解包工具",
-		Width:  1024,
-		Height: 768,
-		AssetServer: &assetserver.Options{
-			Assets: assets,
-		},
-		OnStartup: app.startup,
-		Bind: []interface{}{
-			app,
-		},
+	mygo.App.WhenReady(func() {
+		win := mygo.NewWindow(mygo.WindowOptions{
+			Title:     "微信小程序解包工具",
+			Width:     1180,
+			Height:    760,
+			MinWidth:  900,
+			MinHeight: 560,
+			StateKey:  "main",
+			Content:   ui.View(a.view),
+		})
+		a.start(win)
 	})
-	if err != nil {
+
+	if err := mygo.App.Run(); err != nil {
 		log.Fatal(err)
 	}
 }

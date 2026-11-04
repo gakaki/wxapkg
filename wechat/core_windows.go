@@ -19,64 +19,72 @@ func (m *windowsPlatform) GetDefaultPaths() PathScanResult {
 	var b strings.Builder
 	log := func(line string) { b.WriteString(line + "\n") }
 
+	seen := make(map[string]struct{})
 	var paths []string
-
-	// ── Step 1: 微信 v4 根目录 ──
-	appDataDir, _ := os.UserConfigDir()
-	v4Path := filepath.Join(appDataDir, "Tencent", "xwechat", "radium", "Applet", "packages")
-	if fileInfo, err := os.Stat(v4Path); err == nil && fileInfo.IsDir() {
-		log(fmt.Sprintf("1. 【成功】检测微信 v4 (4.x 版本) - 成功\n   路径: %s", v4Path))
-		paths = append(paths, v4Path)
-	} else {
-		log(fmt.Sprintf("1. 【失败】检测微信 v4 (4.x 版本) - 目录不存在\n   路径: %s", v4Path))
+	add := func(label, path string) {
+		path = filepath.Clean(path)
+		if _, ok := seen[path]; ok || !isDirectory(path) {
+			return
+		}
+		seen[path] = struct{}{}
+		paths = append(paths, path)
+		log(fmt.Sprintf("【成功】%s\n   路径: %s", label, path))
 	}
 
-	// ── Step 2: 微信 v3 注册表 ──
-	wechatKey, err := registry.OpenKey(registry.CURRENT_USER, `Software\Tencent\WeChat`, registry.QUERY_VALUE)
-	if err != nil {
-		log("2. 【失败】检测微信 v3 (3.x 版本) - 未找到注册表项\n   键: HKCU\\Software\\Tencent\\WeChat\\FileSavePath")
-	} else {
-		defer wechatKey.Close()
-		value, _, err := wechatKey.GetStringValue("FileSavePath")
-		if err != nil {
-			log("2. 【失败】检测微信 v3 (3.x 版本) - 未找到注册表值\n   键: HKCU\\Software\\Tencent\\WeChat\\FileSavePath")
-		} else {
+	// WeChat 4.1.7+ stores packages under the current account hash.
+	appData, _ := os.UserConfigDir()
+	radium := filepath.Join(appData, "Tencent", "xwechat", "radium")
+	for _, path := range discoverAppletPackageDirs(radium, 5) {
+		add("微信 4.1.7+ 当前用户小程序目录", path)
+	}
+
+	// WeChat 4.0 and transitional layouts.
+	for _, path := range []string{
+		filepath.Join(radium, "Applet", "packages"),
+		filepath.Join(radium, "applet", "packages"),
+	} {
+		add("微信 4.0 小程序目录", path)
+	}
+
+	// WeChat 3.x stores its data under the configured Documents folder.
+	weChatFiles := []string{}
+	if key, err := registry.OpenKey(registry.CURRENT_USER, `Software\Tencent\WeChat`, registry.QUERY_VALUE); err == nil {
+		value, _, valueErr := key.GetStringValue("FileSavePath")
+		_ = key.Close()
+		if valueErr == nil {
 			if value == "MyDocument:" {
-				value = filepath.Join(os.Getenv("USERPROFILE"), "Documents")
+				if home, homeErr := os.UserHomeDir(); homeErr == nil {
+					value = filepath.Join(home, "Documents")
+				}
 			}
-			v3Path := filepath.Join(value, "WeChat Files")
-			if fileInfo, err := os.Stat(v3Path); err == nil && fileInfo.IsDir() {
-				log(fmt.Sprintf("2. 【成功】检测微信 v3 (3.x 版本) - 成功\n   键: HKCU\\Software\\Tencent\\WeChat\\FileSavePath\n   路径: %s", v3Path))
-				paths = append(paths, v3Path)
-			} else {
-				log(fmt.Sprintf("2. 【失败】检测微信 v3 (3.x 版本) - 目录不存在\n   键: HKCU\\Software\\Tencent\\WeChat\\FileSavePath\n   路径: %s", v3Path))
-			}
-		}
-	}
-
-	// ── Step 3: 微信 v4 多用户 ──
-	usersDir := filepath.Join(appDataDir, "Tencent", "xwechat", "radium", "users")
-	entries, err := os.ReadDir(usersDir)
-	if err != nil || entries == nil {
-		log(fmt.Sprintf("3. 【失败】检测微信 v4 多用户 (4.x 版本) - 目录不存在\n   路径: %s", usersDir))
-	} else {
-		var found []string
-		for _, entry := range entries {
-			if !entry.IsDir() {
-				continue
-			}
-			userDir := filepath.Join(usersDir, entry.Name(), "applet", "packages")
-			if fileInfo, err := os.Stat(userDir); err == nil && fileInfo.IsDir() {
-				paths = append(paths, userDir)
-				found = append(found, entry.Name())
-			}
-		}
-		if len(found) == 0 {
-			log(fmt.Sprintf("3. 【失败】检测微信 v4 多用户 (4.x 版本) - 未找到有效用户\n   路径: %s", usersDir))
+			weChatFiles = append(weChatFiles,
+				filepath.Join(value, "WeChat Files"),
+				filepath.Join(value, "WeChatFiles"),
+			)
+			log("【成功】读取微信 3.x 文件保存位置\n   路径: " + value)
 		} else {
-			log(fmt.Sprintf("3. 【成功】检测微信 v4 多用户 (4.x 版本) - 成功\n   路径: %s\n   有效用户: %s", usersDir, strings.Join(found, ", ")))
+			log("【未找到】微信 3.x 注册表值 HKCU\\Software\\Tencent\\WeChat\\FileSavePath")
+		}
+	} else {
+		log("【未找到】微信 3.x 注册表项 HKCU\\Software\\Tencent\\WeChat")
+	}
+	if home, err := os.UserHomeDir(); err == nil {
+		weChatFiles = append(weChatFiles,
+			filepath.Join(home, "Documents", "WeChat Files"),
+			filepath.Join(home, "Documents", "WeChatFiles"),
+		)
+	}
+	for _, base := range dedupePaths(weChatFiles) {
+		if isDirectory(filepath.Join(base, "Applet")) {
+			add("微信 3.x Applet 目录", filepath.Join(base, "Applet"))
+		}
+		if isDirectory(base) {
+			add("微信 3.x 数据目录", base)
 		}
 	}
 
-	return PathScanResult{Paths: paths, Logs: b.String()}
+	if len(paths) == 0 {
+		log("【提示】请先在微信中打开任意小程序，再重新检测；也可以手动选择 .wxapkg 文件或目录。")
+	}
+	return PathScanResult{Paths: dedupePaths(paths), Logs: b.String()}
 }
