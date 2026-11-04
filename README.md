@@ -4,7 +4,7 @@
 
 微信小程序解包工具是一款纯原生的微信小程序（`.wxapkg`）解包与代码美化工具。它会自动定位微信缓存目录，扫描本机小程序，支持单个或批量解包，并把 JavaScript、HTML、JSON 还原成可读源码。窗口、表格、弹窗和文件选择器全部由 Go 与 [egoist/mygo](https://github.com/egoist/mygo) 原生绘制，不使用 Wails、HTML、JavaScript 或 WebView。
 
-![微信小程序解包工具主界面](assets/screenshot-main.png)
+![微信小程序解包工具主界面](assets/screenshot-main.webp)
 
 ## 为什么用它
 
@@ -35,7 +35,7 @@
 
 ### 批量解包
 
-![批量解包进度](assets/screenshot-batch.png)
+![批量解包进度](assets/screenshot-batch.webp)
 
 点击顶部“批量解包”可以一次处理列表中的全部小程序：
 
@@ -47,7 +47,7 @@
 
 ### 输出目录与设置
 
-![默认输出目录设置](assets/screenshot-settings.png)
+![默认输出目录设置](assets/screenshot-settings.webp)
 
 - 默认输出目录为 `桌面/微信小程序解包目录/`。
 - 可以在设置中修改默认目录，也可以随时恢复默认值。
